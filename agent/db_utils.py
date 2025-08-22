@@ -717,6 +717,76 @@ async def get_validation_results(proposal_id: str) -> List[Dict[str, Any]]:
 
 # Emotional Memory System Functions
 
+async def get_character_emotion_history(
+    character_name: str,
+    limit: int = 20
+) -> List[Dict[str, Any]]:
+    """Retrieves the emotional history for a specific character."""
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT dominant_emotion, intensity, trigger_event, created_at
+            FROM character_emotions
+            WHERE character_name = $1
+            ORDER BY created_at DESC
+            LIMIT $2
+            """,
+            character_name, limit
+        )
+        return [dict(row) for row in rows]
+
+async def get_active_emotional_arcs(
+    character_name: str
+) -> List[Dict[str, Any]]:
+    """Retrieves active emotional arcs for a character."""
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT arc_name, arc_summary, start_emotion_vector, peak_emotion, peak_intensity
+            FROM emotional_arcs
+            WHERE character_name = $1 AND is_active = TRUE
+            ORDER BY updated_at DESC
+            """,
+            character_name
+        )
+        return [dict(row) for row in rows]
+
+async def get_latest_character_emotions(
+    document_id: str,
+    character_names: List[str]
+) -> List[Dict[str, Any]]:
+    """Retrieves the most recent emotion for specified characters in a document."""
+    async with db_pool.acquire() as conn:
+        # It's important to refresh the materialized view to get the latest data.
+        # CONCURRENTLY prevents locking the view for reads.
+        await conn.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY character_latest_emotion")
+        
+        rows = await conn.fetch(
+            """
+            SELECT character_name, dominant_emotion, intensity, created_at
+            FROM character_latest_emotion
+            WHERE document_id = $1::uuid AND character_name = ANY($2::text[])
+            """,
+            document_id, character_names
+        )
+        return [dict(row) for row in rows]
+
+async def get_scene_atmosphere(scene_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieves the emotional atmosphere of a specific scene."""
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT scene_atmosphere
+            FROM scenes
+            WHERE id = $1::uuid
+            """,
+            scene_id
+        )
+        if row and row['scene_atmosphere']:
+            return json.loads(row['scene_atmosphere'])
+        return None
+
+
 async def create_emotion_analysis_run(
     method: str,
     model_name: Optional[str] = None,

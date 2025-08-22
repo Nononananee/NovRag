@@ -1,11 +1,14 @@
 """
-Consistency validators for proposal validation (Fixed version).
+Consistency validators for proposal validation (Fixed and Enhanced version).
 """
 
 import logging
 import re
-from typing import Dict, List, Any, Set
-from datetime import datetime
+from typing import Dict, List, Any, Set, Optional, Tuple
+from datetime import datetime, timezone, timedelta
+
+# Assuming this path is correct based on project structure
+from ..memory.emotional_memory_system import EmotionalState
 
 logger = logging.getLogger(__name__)
 
@@ -13,7 +16,10 @@ logger = logging.getLogger(__name__)
 async def run_all_validators(
     content: str,
     entity_data: Dict[str, Any],
-    established_facts: Set[str]
+    established_facts: Set[str],
+    # New params for emotional validation
+    previous_emotional_state: Optional[Dict[str, Any]] = None,
+    context_events: Optional[List[str]] = None
 ) -> Dict[str, Dict[str, Any]]:
     """
     Run all available validators on the content and entity data.
@@ -22,6 +28,8 @@ async def run_all_validators(
         content: Text content to validate
         entity_data: Entity information to validate
         established_facts: Set of established facts from knowledge graph
+        previous_emotional_state: Last known emotional state of characters
+        context_events: Potential trigger events from the context
     
     Returns:
         Dictionary of validator results
@@ -31,7 +39,13 @@ async def run_all_validators(
         "behavior_consistency": await behavior_consistency_validator(content, entity_data),
         "dialogue_style": await dialogue_style_validator(content, entity_data),
         "trope_detector": await trope_detector_validator(content, entity_data),
-        "timeline_consistency": await timeline_consistency_validator(content, entity_data)
+        "timeline_consistency": await timeline_consistency_validator(content, entity_data),
+        "emotional_consistency": await emotional_consistency_validator(
+            content,
+            entity_data,
+            previous_emotional_state or {},
+            context_events or []
+        ),
     }
     
     return validators
@@ -45,45 +59,54 @@ async def fact_check_validator(
     """
     Validate facts against established knowledge.
     
-    Checks for contradictions with known facts like birthplaces, relationships, etc.
+    FIXED: Now correctly checks for contradictions instead of matches.
     """
     try:
         violations = []
         suggestions = []
         score = 1.0
-        
-        # Extract factual claims from content
-        factual_patterns = [
-            r"born in (\w+)",
-            r"lives in (\w+)",
-            r"works at (\w+)",
-            r"married to (\w+)",
-            r"died in (\d{4})"
-        ]
-        
-        for pattern in factual_patterns:
+        entity_name = entity_data.get('name', 'unknown')
+
+        # Define patterns to extract claims (key, value)
+        # Using more flexible regex as suggested
+        claim_patterns = {
+            "born in": r"born in ([\w\s,]+)",
+            "lives in": r"lives in ([\w\s,]+)",
+            "works at": r"works at ([\w\s,]+)",
+            "married to": r"married to ([\w\s,]+)",
+            "died in": r"died in (\\d{4})"
+        }
+
+        # Create a structured dictionary of established facts for easier lookup
+        facts_dict = {}
+        for fact in established_facts:
+            # Simple parsing, e.g., "CharacterName born_in Paris"
+            parts = fact.split()
+            if len(parts) >= 3:
+                fact_entity, fact_key, fact_value = parts[0], parts[1], " ".join(parts[2:])
+                if fact_entity == entity_name:
+                    facts_dict[fact_key] = fact_value
+
+        for key, pattern in claim_patterns.items():
             matches = re.findall(pattern, content, re.IGNORECASE)
             for match in matches:
-                # Fix f-string issue by doing string operations outside f-string
-                entity_name = entity_data.get('name', 'unknown')
-                pattern_text = pattern.replace('(\\w+)', match).replace('(\\d{4})', match)
-                fact_claim = f"{entity_name} {pattern_text}"
+                new_claim_value = match.strip()
                 
-                # Check against established facts (simplified)
-                if any(fact_claim.lower() in established_fact.lower() for established_fact in established_facts):
-                    # Potential contradiction found
+                # CRITICAL FIX: Check for CONTRADICTION
+                if key in facts_dict and facts_dict[key].lower() != new_claim_value.lower():
+                    violation_text = f"Claim '{new_claim_value}' contradicts established fact '{facts_dict[key]}'."
                     violations.append({
                         "type": "fact_contradiction",
-                        "claim": fact_claim,
-                        "severity": "high",
-                        "location": content.find(match)
+                        "claim": f"{entity_name} {key} {new_claim_value}",
+                        "contradiction": violation_text,
+                        "severity": "high"
                     })
-                    score -= 0.2
-                    suggestions.append(f"Verify claim: {fact_claim}")
-        
-        # Check for impossible dates
+                    score -= 0.5 # Higher penalty for direct contradiction
+                    suggestions.append(f"Verify fact for {entity_name}: The story states they {key} '{new_claim_value}', but it was previously established as '{facts_dict[key]}'.")
+
+        # (The impossible date check logic was correct and can remain)
         current_year = datetime.now().year
-        year_matches = re.findall(r'\b(19|20)\d{2}\b', content)
+        year_matches = re.findall(r'\\b(19|20)\\d{2}\\b', content)
         for year_str in year_matches:
             year = int(year_str)
             if year > current_year:
@@ -211,9 +234,9 @@ async def dialogue_style_validator(
         
         # Extract dialogue from content
         dialogue_patterns = [
-            r'"([^"]+)"',  # Standard quotes
-            r"'([^']+)'",  # Single quotes
-            r"said\s+[^:]+:\s*(.+)",  # "said X: content"
+            r'"([^"]+)"',
+            r"'([^"]+)'",
+            r"said\\s+[^:]+:\s*(.+)",  # "said X: content"
         ]
         
         dialogues = []
@@ -365,11 +388,11 @@ async def timeline_consistency_validator(
         
         # Extract temporal references
         temporal_patterns = [
-            r"(\d+)\s+years?\s+ago",
-            r"in\s+(\d{4})",
-            r"(\d+)\s+years?\s+old",
-            r"after\s+(\d+)\s+years?",
-            r"before\s+(\d+)\s+years?"
+            r"(\\d+)\\s+years?\\s+ago",
+            r"in\\s+(\\d{4})",
+            r"(\\d+)\\s+years?\\s+old",
+            r"after\\s+(\\d+)\\s+years?",
+            r"before\\s+(\\d+)\\s+years?"
         ]
         
         temporal_refs = []
@@ -423,3 +446,97 @@ async def timeline_consistency_validator(
             "suggestions": ["Manual timeline consistency check required"],
             "validator_type": "timeline_consistency"
         }
+
+async def emotional_consistency_validator(
+    content: str,
+    entity_data: Dict[str, Any],
+    previous_emotional_state: Dict[str, Any],
+    context_events: List[str]
+) -> Dict[str, Any]:
+    """
+    Validate emotional consistency for characters based on detailed user feedback.
+    """
+    violations = []
+    suggestions = []
+    score = 1.0
+    character_name = entity_data.get("name")
+
+    if not character_name or not previous_emotional_state.get(character_name):
+        return {
+            "score": 1.0, "violations": [],
+            "suggestions": [f"No previous emotional state for {character_name} to compare against."],
+            "validator_type": "emotional_consistency"
+        }
+
+    # 1. Enriched Emotion Detection
+    def detect_emotion(text: str) -> Optional[Tuple[str, float]]:
+        # (Enhanced keyword matching with intensity)
+        emotion_keywords = {
+            "joy": ([("ecstatic", 1.0), ("elated", 1.0), ("euphoric", 1.0), 
+                     ("happy", 0.7), ("joyful", 0.7), ("laughed", 0.7), ("smiled", 0.7),
+                     ("pleased", 0.4), ("content", 0.4)]),
+            "sadness": ([("devastated", 1.0), ("grief", 1.0), ("heartbroken", 1.0),
+                         ("sad", 0.7), ("cried", 0.7), ("unhappy", 0.7),
+                         ("disappointed", 0.4), ("down", 0.4)]),
+            "anger": ([("furious", 1.0), ("rage", 1.0), ("enraged", 1.0),
+                       ("angry", 0.7), ("yelled", 0.7), ("fumed", 0.7),
+                       ("annoyed", 0.4), ("irritated", 0.4)]),
+            "fear": ([("terrified", 1.0), ("petrified", 1.0),
+                      ("scared", 0.7), ("feared", 0.7), ("anxious", 0.7),
+                      ("worried", 0.4), ("nervous", 0.4)]),
+        }
+        text_lower = text.lower()
+        for emotion, levels in emotion_keywords.items():
+            for keyword, intensity in levels:
+                if keyword in text_lower:
+                    return emotion, intensity
+        return None
+
+    detected_emotion_info = detect_emotion(content)
+    if not detected_emotion_info:
+        return { "score": 1.0, "violations": [], "suggestions": [], "validator_type": "emotional_consistency" }
+
+    detected_emotion, detected_intensity = detected_emotion_info
+    prev_state = previous_emotional_state[character_name]
+    prev_emotion = prev_state.get('emotion')
+    prev_timestamp = prev_state.get('timestamp')
+
+    # 2. Nuanced Transition Rules
+    emotion_transitions = {
+        "natural": { "sadness": ["anger", "melancholy"], "joy": ["contentment", "excitement"], "anger": ["frustration", "sadness"], "fear": ["sadness", "anger"] },
+        "requires_trigger": { "sadness": ["joy", "excitement"], "anger": ["joy", "trust"], "fear": ["joy", "confidence"] },
+        "impossible": { "grief": ["euphoria"], "terror": ["bliss"] }
+    }
+
+    transition_type = "plausible"
+    if prev_emotion in emotion_transitions["impossible"] and detected_emotion in emotion_transitions["impossible"][prev_emotion]:
+        transition_type = "impossible"
+    elif prev_emotion in emotion_transitions["requires_trigger"] and detected_emotion in emotion_transitions["requires_trigger"][prev_emotion]:
+        transition_type = "requires_trigger"
+    
+    # 3. Temporal & Trigger Consideration
+    time_since_last_emotion = timedelta.max
+    if prev_timestamp:
+        try:
+            # Assuming ISO format string
+            time_since_last_emotion = datetime.now(timezone.utc) - datetime.fromisoformat(prev_timestamp)
+        except:
+            pass # Ignore if timestamp format is wrong
+
+    has_trigger = bool(context_events) # Simple check if any trigger event is provided
+
+    # 4. Detailed Severity & Actionable Suggestions
+    if transition_type == "impossible":
+        score -= 0.5
+        violations.append({ "type": "emotional_inconsistency", "character": character_name, "from": prev_emotion, "to": detected_emotion, "severity": "high" })
+        suggestions.append(f"The emotional shift from '{prev_emotion}' to '{detected_emotion}' for {character_name} is nearly impossible. A significant, transformative event is required.")
+    elif transition_type == "requires_trigger" and not has_trigger:
+        penalty = 0.3
+        if time_since_last_emotion < timedelta(hours=1):
+            penalty = 0.4 # Higher penalty for rapid, untriggered change
+        score -= penalty
+        violations.append({ "type": "emotional_inconsistency", "character": character_name, "from": prev_emotion, "to": detected_emotion, "severity": "medium" })
+        suggestions.append(f"Character {character_name} shows a drastic emotional shift from '{prev_emotion}' to '{detected_emotion}' without a clear trigger. Consider adding an external event or internal monologue to justify it.")
+        suggestions.append(f"Suggestion: A more gradual transition could be {prev_emotion} -> frustration -> {detected_emotion}.")
+
+    return { "score": max(0.0, score), "violations": violations, "suggestions": suggestions, "validator_type": "emotional_consistency" }

@@ -120,10 +120,37 @@ class IntegratedNovelMemorySystem:
         """Generate content with full memory and consistency context"""
         
         try:
-            # Step 1: Build optimal memory context
+            # Step 1: Enrich generation_context with the latest emotional states for validation later
+            if generation_context.target_characters and self.emotional_memory.db_utils:
+                try:
+                    # Assuming the first character's document is the relevant one.
+                    # This might need a more robust way to determine the current document context.
+                    all_chunks = await self.memory_manager.get_all_memory_chunks()
+                    if all_chunks:
+                        # A simple way to get a relevant document_id
+                        # In a real scenario, this should be passed in or determined more reliably
+                        doc_id_for_context = all_chunks[0].document_id 
+                        
+                        latest_emotions_data = await self.emotional_memory.db_utils.get_latest_character_emotions(
+                            document_id=doc_id_for_context,
+                            character_names=generation_context.target_characters
+                        )
+                        latest_emotions = {
+                            item['character_name']: EmotionalState(
+                                character_name=item['character_name'],
+                                primary_emotion=item['dominant_emotion'],
+                                intensity=item['intensity']
+                            ) for item in latest_emotions_data
+                        }
+                        generation_context.character_emotional_states = latest_emotions
+                        logger.info(f"Enriched generation context with latest emotions for: {list(latest_emotions.keys())}")
+                except Exception as e:
+                    logger.error(f"Failed to enrich generation_context with emotions: {e}")
+
+            # Step 2: Build optimal memory context
             memory_context = await self._build_memory_context(generation_context)
             
-            # Step 2: Check consistency before generation
+            # Step 3: Check consistency before generation
             consistency_ok, pre_issues = await self.consistency_manager.check_consistency_before_generation(
                 context=memory_context,
                 generation_intent=generation_context.__dict__
@@ -139,20 +166,20 @@ class IntegratedNovelMemorySystem:
                     quality_score=0.0
                 )
             
-            # Step 3: Generate content with LLM
+            # Step 4: Generate content with LLM
             generated_content = await self._generate_content_with_llm(
                 context=memory_context,
                 generation_context=generation_context,
                 prompt=prompt
             )
             
-            # Step 4: Validate generated content for consistency
+            # Step 5: Validate generated content for consistency
             content_valid, post_issues = await self.consistency_manager.validate_generated_content(
                 new_content=generated_content,
                 context=memory_context
             )
             
-            # Step 5: Analyze emotional content
+            # Step 6: Analyze emotional content
             emotional_states = []
             emotional_consistency_score = 0.0
             emotional_arc_progression = {}
@@ -182,7 +209,7 @@ class IntegratedNovelMemorySystem:
             except Exception as e:
                 logger.warning(f"Emotional analysis failed: {e}")
             
-            # Step 6: Validate narrative structure
+            # Step 7: Validate narrative structure
             structure_validation_result = None
             structure_adherence_score = 0.0
             
@@ -216,7 +243,7 @@ class IntegratedNovelMemorySystem:
             except Exception as e:
                 logger.warning(f"Structure validation failed: {e}")
             
-            # Step 7: Analyze style consistency
+            # Step 8: Analyze style consistency
             style_analysis_result = None
             style_consistency_score = 0.0
             
@@ -243,7 +270,7 @@ class IntegratedNovelMemorySystem:
             except Exception as e:
                 logger.warning(f"Style analysis failed: {e}")
             
-            # Step 8: Fix consistency issues if possible
+            # Step 9: Fix consistency issues if possible
             if not content_valid:
                 generated_content, remaining_issues = await self.consistency_manager.fix_consistency_issues(
                     content=generated_content,
@@ -252,13 +279,13 @@ class IntegratedNovelMemorySystem:
             else:
                 remaining_issues = post_issues
             
-            # Step 9: Process new content into memory chunks
+            # Step 10: Process new content into memory chunks
             new_chunks = await self._process_new_content_into_memory(
                 content=generated_content,
                 generation_context=generation_context
             )
             
-            # Step 10: Update memory system and emotional memory
+            # Step 11: Update memory system and emotional memory
             for chunk in new_chunks:
                 await self.memory_manager.store_memory_chunk(chunk)
                 
@@ -267,7 +294,7 @@ class IntegratedNovelMemorySystem:
                     if emotional_state.source_chunk_id is None:
                         emotional_state.source_chunk_id = chunk.id
             
-            # Step 11: Calculate quality metrics
+            # Step 12: Calculate quality metrics
             quality_score = await self._calculate_content_quality(generated_content, memory_context)
             originality_score = await self._calculate_originality_score(generated_content)
             
@@ -280,64 +307,7 @@ class IntegratedNovelMemorySystem:
                 consistency_issues=remaining_issues,
                 memory_tokens_used=len(memory_context.split()),
                 generation_metadata={
-                    "context_chunks_used": len(memory_context.split("===")),
-                    "consistency_checks_passed": content_valid,
-                    "auto_fixes_applied": len(post_issues) - len(remaining_issues),
-                    "emotional_states_count": len(emotional_states),
-                    "structure_validation_performed": structure_validation_result is not None,
-                    "style_analysis_performed": style_analysis_result is not None
-                },
-                quality_score=quality_score,
-                originality_score=originality_score,
-                emotional_states_detected=emotional_states,
-                emotional_consistency_score=emotional_consistency_score,
-                emotional_arc_progression=emotional_arc_progression,
-                structure_validation_result=structure_validation_result,
-                structure_adherence_score=structure_adherence_score,
-                style_analysis_result=style_analysis_result,
-                style_consistency_score=style_consistency_score
-            )
-            
-        except Exception as e:
-            return GenerationResult(
-                generated_content="",
-                memory_chunks_created=[],
-                consistency_issues=[],
-                memory_tokens_used=0,
-                generation_metadata={"error": str(e)},
-                quality_score=0.0,
-                originality_score=0.0
-            )
-
-    async def _build_memory_context(self, generation_context: GenerationContext) -> str:
-        """Build comprehensive memory context for generation"""
-        
-        # Calculate current position in novel
-        current_position = generation_context.current_word_count
-        
-        # Build context using memory manager
-        memory_context = await self.memory_manager.build_context_for_generation(
-            current_position=current_position,
-            generation_type=generation_context.generation_intent,
-            target_characters=generation_context.target_characters,
-            plot_threads=generation_context.active_plot_threads
-        )
-        
-        # Add character-specific context if POV character specified
-        if generation_context.pov_character:
-            character_context = await self._build_character_specific_context(
-                generation_context.pov_character
-            )
-            memory_context = f"{memory_context}\n\n=== POV CHARACTER CONTEXT ===\n{character_context}"
-        
-        # Add scene-specific context if location specified
-        if generation_context.scene_location:
-            location_context = await self._build_location_context(
-                generation_context.scene_location
-            )
-            memory_context = f"{memory_context}\n\n=== SCENE LOCATION ===\n{location_context}"
-        
-        return memory_context
+                    "context_chunks_used": len(memory_context.split("===")), # Corrected escaping for
 
     async def _generate_content_with_llm(self, 
                                        context: str, 
